@@ -1,8 +1,11 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#define GLM_FORCE_RADIANS
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -707,6 +710,27 @@ private:
 		return shader_module;
 	}
 
+	void createDescriptorSetLayout()
+	{
+		VkDescriptorSetLayoutBinding ubo_layout_binding = {};
+		ubo_layout_binding.binding = 0;
+		ubo_layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		ubo_layout_binding.descriptorCount = 1;
+		ubo_layout_binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+		ubo_layout_binding.pImmutableSamplers = nullptr;
+
+		VkDescriptorSetLayoutCreateInfo layout_info = {};
+		layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		layout_info.bindingCount = 1;
+		layout_info.pBindings = &ubo_layout_binding;
+
+		if ( auto status = vkCreateDescriptorSetLayout( device_, &layout_info, nullptr, &descriptor_set_layout_ );
+			 status != VK_SUCCESS )
+		{
+			throw std::runtime_error( "Failed to creat descriptor set layout!" );
+		}
+	}
+
 	void createGraphicsPipeline()
 	{
 		auto vert_shader_code = readFile( "vert.spv" );
@@ -769,7 +793,7 @@ private:
 		rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
 		rasterizer.lineWidth = 1.0f;
 		rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-		rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+		rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 		rasterizer.depthBiasEnable = VK_FALSE;
 		//rasterizer.depthBiasConstantFactor = 0.0f;
 		//rasterizer.depthBiasClamp = 0.0f;
@@ -811,8 +835,8 @@ private:
 		
 		VkPipelineLayoutCreateInfo pipeline_layout_info = {};
 		pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-		pipeline_layout_info.setLayoutCount = 0;
-		pipeline_layout_info.pSetLayouts = nullptr;
+		pipeline_layout_info.setLayoutCount = 1;
+		pipeline_layout_info.pSetLayouts = &descriptor_set_layout_;
 		pipeline_layout_info.pushConstantRangeCount = 0;
 		pipeline_layout_info.pPushConstantRanges = nullptr;
 
@@ -945,7 +969,12 @@ private:
 			VkDeviceSize offsets[ ] = { 0 };
 			vkCmdBindVertexBuffers( command_buffers_[i], 0, 1, vertex_buffers, offsets );
 			vkCmdBindIndexBuffer( command_buffers_[i], index_buffer_, 0, VK_INDEX_TYPE_UINT16 );
-
+			vkCmdBindDescriptorSets( command_buffers_[i],
+									 VK_PIPELINE_BIND_POINT_GRAPHICS,
+									 pipeline_layout_,
+									 0, 1,
+									 &descriptor_sets_[i],
+									 0, nullptr );
 			vkCmdDrawIndexed( command_buffers_[i],
 							  static_cast<uint32_t>( indices.size() ),
 							  1, 0, 0, 0 );
@@ -1174,6 +1203,87 @@ private:
 		vkFreeMemory( device_, staging_memory, nullptr );
 	}
 
+	
+	void createUniformBuffer()
+	{
+		VkDeviceSize buffer_size = sizeof( UniformBufferObject );
+		uniform_buffers_.resize( swap_chain_images_.size() );
+		uniform_buffers_memory_.resize( swap_chain_images_.size() );
+
+		for ( size_t i = 0; i < swap_chain_images_.size(); ++i )
+		{
+			createBuffer( buffer_size,
+						  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+						  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+						  | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+						  uniform_buffers_[i],
+						  uniform_buffers_memory_[i] );
+		}
+	}
+
+	void createDescriptorPool()
+	{
+		VkDescriptorPoolSize pool_size = {};
+		pool_size.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		pool_size.descriptorCount = static_cast<uint32_t>( swap_chain_images_.size() );
+
+		VkDescriptorPoolCreateInfo pool_info = {};
+		pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		pool_info.poolSizeCount = 1;
+		pool_info.pPoolSizes = &pool_size;
+		pool_info.maxSets = static_cast<uint32_t>( swap_chain_images_.size() );
+
+		if ( auto status = vkCreateDescriptorPool( device_,
+												   &pool_info,
+												   nullptr,
+												   &descriptor_pool_ );
+			 status != VK_SUCCESS )
+		{
+			throw std::runtime_error( "Failed to create descriptor pool!" );
+		}
+	}
+
+	void createDescriptorSets()
+	{
+		std::vector<VkDescriptorSetLayout> layouts( swap_chain_images_.size(),
+													descriptor_set_layout_ );
+		VkDescriptorSetAllocateInfo alloc_info = {};
+		alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		alloc_info.descriptorPool = descriptor_pool_;
+		alloc_info.descriptorSetCount = static_cast<uint32_t>( swap_chain_images_.size() );
+		alloc_info.pSetLayouts = layouts.data();
+
+		descriptor_sets_.resize( swap_chain_images_.size() );
+		if ( auto status = vkAllocateDescriptorSets( device_,
+													 &alloc_info,
+													 descriptor_sets_.data() );
+			 status != VK_SUCCESS )
+		{
+			throw std::runtime_error( "Failed to allocate descriptor sets!" );
+		}
+
+		for ( size_t i = 0; i < swap_chain_images_.size(); ++i )
+		{
+			VkDescriptorBufferInfo buffer_info = {};
+			buffer_info.buffer = uniform_buffers_[i];
+			buffer_info.offset = 0;
+			buffer_info.range = sizeof( UniformBufferObject );
+
+			VkWriteDescriptorSet descriptor_write = {};
+			descriptor_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			descriptor_write.dstSet = descriptor_sets_[i];
+			descriptor_write.dstBinding = 0;
+			descriptor_write.dstArrayElement = 0;
+			descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			descriptor_write.descriptorCount = 1;
+			descriptor_write.pBufferInfo = &buffer_info;
+			descriptor_write.pImageInfo = nullptr;
+			descriptor_write.pTexelBufferView = nullptr;
+
+			vkUpdateDescriptorSets( device_, 1, &descriptor_write, 0, nullptr );
+		}
+	}
+
 	void initVulkan() {
 		createInstance();
 		setupDebugCallback();
@@ -1183,11 +1293,15 @@ private:
 		createSwapChain();
 		createImageViews();
 		createRenderPass();
+		createDescriptorSetLayout();
 		createGraphicsPipeline();
 		createFramebuffers();
 		createCommandPool();
 		createVertexBuffer();
 		createIndexBuffer();
+		createUniformBuffer();
+		createDescriptorPool();
+		createDescriptorSets();
 		createCommandBuffers();
 		createSyncObjects();
 	}
@@ -1200,6 +1314,35 @@ private:
 		}
 
 		vkDeviceWaitIdle( device_ );
+	}
+
+	void updateUniformBuffer(uint32_t current_image)
+	{
+		static auto start_time = std::chrono::high_resolution_clock::now();
+		auto current_time = std::chrono::high_resolution_clock::now();
+		float time = std::chrono::duration<float, std::chrono::seconds::period>( current_time - start_time ).count();
+
+		UniformBufferObject ubo = {};
+		ubo.model = glm::rotate( glm::mat4( 1.0f ),
+								 time * glm::radians( 90.0f ),
+								 glm::vec3( 0.0f, 0.0f, 1.0f ) );
+
+		ubo.view = glm::lookAt( glm::vec3( 2.0f, 2.0f, 2.0f ),
+								glm::vec3( 0.0f, 0.0f, 0.0f ),
+								glm::vec3( 0.0f, 0.0f, 1.0f ) );
+
+		ubo.proj = glm::perspective( glm::radians( 45.0f ),
+									 swap_chain_extent_.width / (float)swap_chain_extent_.height,
+									 0.1f, 10.0f );
+
+		ubo.proj[1][1] *= -1; // Opengl -> vulkan
+		void *data;
+		vkMapMemory( device_,
+					 uniform_buffers_memory_[current_image],
+					 0, sizeof( ubo ), 0, &data );
+
+		memcpy( data, &ubo, sizeof( ubo ) );
+		vkUnmapMemory( device_, uniform_buffers_memory_[current_image] );
 	}
 
 	void drawFrame()
@@ -1228,6 +1371,8 @@ private:
 		{
 			throw std::runtime_error( "Failed to aquire swapchain image!" );
 		}
+
+		updateUniformBuffer( image_index );
 		
 		VkSubmitInfo submit_info = {};
 		submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1301,6 +1446,9 @@ private:
 	void cleanup() {
 		cleanupSwapChain();
 
+		vkDestroyDescriptorPool( device_, descriptor_pool_, nullptr );
+		vkDestroyDescriptorSetLayout( device_, descriptor_set_layout_, nullptr );
+
 		vkDestroyBuffer( device_, vertex_buffer_, nullptr );
 		vkFreeMemory( device_, vertex_buffer_memory_, nullptr );
 		vkDestroyBuffer( device_, index_buffer_, nullptr );
@@ -1356,6 +1504,8 @@ private:
 	VkShaderModule frag_shader_module_;
 
 	VkRenderPass render_pass_;
+
+	VkDescriptorSetLayout descriptor_set_layout_;
 	VkPipelineLayout pipeline_layout_;
 	VkPipeline graphics_pipeline_;
 
@@ -1375,6 +1525,12 @@ private:
 	VkDeviceMemory vertex_buffer_memory_;
 	VkBuffer index_buffer_;
 	VkDeviceMemory index_buffer_memory_;
+
+	std::vector<VkBuffer> uniform_buffers_;
+	std::vector<VkDeviceMemory> uniform_buffers_memory_;
+
+	VkDescriptorPool descriptor_pool_;
+	std::vector<VkDescriptorSet> descriptor_sets_;
 };
 
 int main() {
