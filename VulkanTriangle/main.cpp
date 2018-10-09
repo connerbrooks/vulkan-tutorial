@@ -1449,6 +1449,12 @@ private:
 		vkDestroyDescriptorPool( device_, descriptor_pool_, nullptr );
 		vkDestroyDescriptorSetLayout( device_, descriptor_set_layout_, nullptr );
 
+		for ( size_t i = 0; i < swap_chain_images_.size(); ++i )
+		{
+			vkDestroyBuffer( device_, uniform_buffers_[i], nullptr );
+			vkFreeMemory( device_, uniform_buffers_memory_[i], nullptr );
+		}
+
 		vkDestroyBuffer( device_, vertex_buffer_, nullptr );
 		vkFreeMemory( device_, vertex_buffer_memory_, nullptr );
 		vkDestroyBuffer( device_, index_buffer_, nullptr );
